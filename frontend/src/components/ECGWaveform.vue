@@ -30,6 +30,7 @@ import {
   TooltipComponent,
   GridComponent,
   MarkPointComponent,
+  MarkLineComponent,
   DataZoomComponent,
   LegendComponent,
 } from 'echarts/components';
@@ -43,6 +44,7 @@ use([
   TooltipComponent,
   GridComponent,
   MarkPointComponent,
+  MarkLineComponent,
   DataZoomComponent,
   LegendComponent,
 ]);
@@ -65,23 +67,35 @@ const chartRef = ref<InstanceType<typeof VChart> | null>(null);
 
 const chartOption = computed(() => {
   const totalSamples = props.samples.length;
-  const timeAxis = Array.from({ length: totalSamples }, (_, i) =>
-    (i / props.samplingRate).toFixed(3)
-  );
 
   // Downsample for performance: show every 2nd point if too many samples
   const step = totalSamples > 5000 ? 2 : 1;
-  const downsampledTime: string[] = [];
-  const downsampledValues: number[] = [];
+  // Numeric [time, amplitude] pairs so markers, tooltip and zoom share one coordinate system
+  const seriesData: [number, number][] = [];
   for (let i = 0; i < totalSamples; i += step) {
-    downsampledTime.push(timeAxis[i]);
-    downsampledValues.push(props.samples[i]);
+    seriesData.push([i / props.samplingRate, props.samples[i]]);
   }
 
-  // R-peak markers
+  // Amplitude range of the actual signal -> dynamic vertical scale
+  let minSample = Infinity;
+  let maxSample = -Infinity;
+  for (let i = 0; i < totalSamples; i++) {
+    const v = props.samples[i];
+    if (v < minSample) minSample = v;
+    if (v > maxSample) maxSample = v;
+  }
+  if (!isFinite(minSample) || !isFinite(maxSample)) {
+    minSample = -1;
+    maxSample = 1;
+  }
+  const pad = Math.max(0.2, (maxSample - minSample) * 0.1);
+  const yMin = Math.floor((minSample - pad) * 10) / 10;
+  const yMax = Math.ceil((maxSample + pad) * 10) / 10;
+
+  // R-peak markers pinned to the exact peak coordinates
   const rPeakMarkers = props.rPeaks.map((rp) => ({
     name: 'R',
-    coord: [(rp.time).toFixed(3), rp.amplitude],
+    coord: [rp.time, rp.amplitude],
     value: `${rp.amplitude.toFixed(2)} mV`,
     symbol: 'triangle',
     symbolSize: 10,
@@ -95,19 +109,13 @@ const chartOption = computed(() => {
     },
   }));
 
-  // Grid lines for medical ECG appearance
+  // Grid lines for medical ECG appearance (0.2s / 0.5mV spacing)
   const gridLines: any[] = [];
-  for (let x = 0; x <= props.duration; x += 0.2) {
-    gridLines.push([
-      { xAxis: x.toFixed(3), yAxis: -2 },
-      { xAxis: x.toFixed(3), yAxis: 2 },
-    ]);
+  for (let k = 0; k * 0.2 <= props.duration + 1e-9; k++) {
+    gridLines.push({ xAxis: Math.round(k * 0.2 * 1000) / 1000 });
   }
-  for (let y = -2; y <= 2; y += 0.5) {
-    gridLines.push([
-      { xAxis: '0', yAxis: y },
-      { xAxis: props.duration.toFixed(3), yAxis: y },
-    ]);
+  for (let y = Math.ceil(yMin / 0.5) * 0.5; y <= yMax + 1e-9; y += 0.5) {
+    gridLines.push({ yAxis: Math.round(y * 1000) / 1000 });
   }
 
   return {
@@ -126,19 +134,21 @@ const chartOption = computed(() => {
       textStyle: { color: '#fff', fontSize: 12 },
       formatter: (params: any) => {
         const p = Array.isArray(params) ? params[0] : params;
-        return `时间: ${p.name}s<br/>振幅: ${p.value?.toFixed(3)} mV`;
+        const [t, v] = (p.value ?? [0, 0]) as [number, number];
+        return `时间: ${t.toFixed(3)}s<br/>振幅: ${v.toFixed(3)} mV`;
       },
     },
     xAxis: {
-      type: 'category',
-      data: downsampledTime,
+      type: 'value',
+      min: 0,
+      max: props.duration,
       name: '时间 (s)',
       nameTextStyle: { color: '#9ca3af', fontSize: 11 },
       axisLine: { lineStyle: { color: '#374151' } },
       axisLabel: {
         color: '#9ca3af',
         fontSize: 10,
-        interval: Math.floor(downsampledTime.length / 10),
+        formatter: (val: number) => Number(val.toFixed(2)).toString(),
       },
       splitLine: {
         show: true,
@@ -149,8 +159,8 @@ const chartOption = computed(() => {
       type: 'value',
       name: 'mV',
       nameTextStyle: { color: '#9ca3af', fontSize: 11 },
-      min: -1.5,
-      max: 1.8,
+      min: yMin,
+      max: yMax,
       axisLine: { lineStyle: { color: '#374151' } },
       axisLabel: { color: '#9ca3af', fontSize: 10 },
       splitLine: {
@@ -180,7 +190,7 @@ const chartOption = computed(() => {
       {
         name: 'ECG',
         type: 'line',
-        data: downsampledValues,
+        data: seriesData,
         showSymbol: false,
         lineStyle: {
           color: '#10b981',
@@ -189,6 +199,14 @@ const chartOption = computed(() => {
         markPoint: {
           data: rPeakMarkers,
           animation: false,
+        },
+        markLine: {
+          silent: true,
+          symbol: 'none',
+          animation: false,
+          label: { show: false },
+          lineStyle: { color: 'rgba(16, 185, 129, 0.12)', width: 1 },
+          data: gridLines,
         },
         z: 10,
       },
